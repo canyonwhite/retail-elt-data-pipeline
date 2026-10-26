@@ -7,6 +7,7 @@ Requires-Dist: pandas<3,>=2.2
 Requires-Dist: boto3<2,>=1.40
 Requires-Dist: snowflake-connector-python
 Requires-Dist: python-dotenv
+Requires-Dist: requests<3,>=2.32
 Provides-Extra: dev
 Requires-Dist: pytest<10,>=8; extra == "dev"
 Requires-Dist: ruff<1,>=0.9; extra == "dev"

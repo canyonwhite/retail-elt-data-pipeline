@@ -2,6 +2,7 @@ pandas<3,>=2.2
 boto3<2,>=1.40
 snowflake-connector-python
 python-dotenv
+requests<3,>=2.32
 
 [dev]
 pytest<10,>=8
