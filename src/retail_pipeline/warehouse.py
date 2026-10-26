@@ -275,3 +275,99 @@ def load_orders_batch(
 
     finally:
         cursor.close()
+
+def load_exchange_rate_batch(
+    connection,
+    manifest: dict,
+) -> dict:
+    """Load one exchange-rate batch into Snowflake RAW."""
+
+    import re
+
+    if manifest.get("dataset") != "exchange_rates":
+        raise ValueError("Unexpected dataset")
+
+    batch_id = manifest["batch_id"]
+
+    if (
+        not isinstance(batch_id, str)
+        or not re.fullmatch(r"[0-9]+", batch_id)
+    ):
+        raise ValueError("Invalid batch ID")
+
+    expected_count = manifest["record_count"]
+
+    if expected_count <= 0:
+        raise ValueError("Empty exchange-rate batch")
+
+    suffix = f"%/batch_id={batch_id}/rates.json"
+
+    cursor = connection.cursor()
+
+    try:
+        # Check whether this source file has already
+        # been loaded into the RAW table.
+        cursor.execute(
+            """
+            SELECT COUNT(*)
+            FROM RETAIL_DB.RAW.EXCHANGE_RATES_API
+            WHERE SOURCE_FILE LIKE %s
+            """,
+            (suffix,),
+        )
+
+        existing_count = cursor.fetchone()[0]
+
+        if existing_count == expected_count:
+            return {
+                "status": "already_processed",
+                "source_rows": expected_count,
+            }
+
+        if existing_count != 0:
+            raise ValueError(
+                "Partially loaded or conflicting FX batch"
+            )
+
+        # The batch ID has been validated as digits.
+        cursor.execute(
+            f"""
+            COPY INTO RETAIL_DB.RAW.EXCHANGE_RATES_API (
+                RAW_RECORD,
+                SOURCE_FILE
+            )
+            FROM (
+                SELECT
+                    t.$1,
+                    METADATA$FILENAME
+                FROM
+                    @RETAIL_DB.RAW.FX_RATES_STAGE/
+                    batch_id={batch_id}/rates.json t
+            )
+            ON_ERROR = 'ABORT_STATEMENT'
+            """
+        )
+
+        cursor.execute(
+            """
+            SELECT COUNT(*)
+            FROM RETAIL_DB.RAW.EXCHANGE_RATES_API
+            WHERE SOURCE_FILE LIKE %s
+            """,
+            (suffix,),
+        )
+
+        loaded_count = cursor.fetchone()[0]
+
+        if loaded_count != expected_count:
+            raise ValueError(
+                "Exchange-rate load count mismatch"
+            )
+
+        return {
+            "status": "success",
+            "source_rows": loaded_count,
+        }
+
+    finally:
+        cursor.close()

@@ -56,3 +56,6 @@ build/
 
 # Source files
 source/
+
+# Dockerfile
+Dockerfile

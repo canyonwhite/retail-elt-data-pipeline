@@ -147,3 +147,69 @@ def upload_batch(
         "raw_status": raw_status,
         "manifest_status": manifest_status,
     }
+
+def upload_exchange_rate_batch(
+    s3_client,
+    bucket: str,
+    raw_path: Path,
+    manifest_path: Path,
+) -> dict:
+    """Upload a prepared exchange-rate batch."""
+
+    manifest = json.loads(
+        manifest_path.read_text(encoding="utf-8")
+    )
+
+    if manifest.get("dataset") != "exchange_rates":
+        raise ValueError("Unexpected dataset")
+
+    batch_id = manifest["batch_id"]
+
+    if (
+        not isinstance(batch_id, str)
+        or not batch_id.isascii()
+        or not batch_id.isdigit()
+    ):
+        raise ValueError("Invalid batch ID")
+
+    raw_bytes = raw_path.read_bytes()
+
+    if (
+        hashlib.sha256(raw_bytes).hexdigest()
+        != manifest["sha256"]
+        or len(raw_bytes) != manifest["file_size_bytes"]
+    ):
+        raise ValueError("Source does not match manifest")
+
+    raw_key = (
+        f"raw/exchange_rates/"
+        f"batch_id={batch_id}/rates.json"
+    )
+
+    manifest_key = (
+        "metadata/ingestion_manifests/"
+        f"exchange_rates/batch_id={batch_id}.json"
+    )
+
+    raw_status = put_immutable_object(
+        s3_client,
+        bucket,
+        raw_key,
+        raw_bytes,
+        "application/json",
+    )
+
+    manifest_status = put_immutable_object(
+        s3_client,
+        bucket,
+        manifest_key,
+        manifest_path.read_bytes(),
+        "application/json",
+    )
+
+    return {
+        "raw_key": raw_key,
+        "manifest_key": manifest_key,
+        "raw_status": raw_status,
+        "manifest_status": manifest_status,
+    }

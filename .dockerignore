@@ -1,0 +1,11 @@
+.git
+.venv
+.env
+**/.env
+data/
+logs/
+secrets/
+*.p8
+*.pem
+__pycache__/
+.pytest_cache/
