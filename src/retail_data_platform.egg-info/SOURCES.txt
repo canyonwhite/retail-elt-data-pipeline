@@ -13,6 +13,7 @@ src/retail_pipeline/validation.py
 src/retail_pipeline/warehouse.py
 tests/test_exchange_rates.py
 tests/test_ingestion.py
+tests/test_quality.py
 tests/test_storage.py
 tests/test_validation.py
 tests/test_warehouse.py

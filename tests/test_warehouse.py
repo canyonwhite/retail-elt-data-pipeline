@@ -1,9 +1,50 @@
+from unittest.mock import MagicMock
+
 import pytest
 
 from retail_pipeline.warehouse import (
     ORDER_COLUMNS,
+    publish_fx_landing,
     verify_s3_batch,
 )
+
+
+def test_fx_audit_failure_triggers_rollback():
+    cursor = MagicMock()
+
+    def execute_with_failure(sql, params=None):
+        if (
+            "INSERT INTO RETAIL_DB.RAW.INGESTION_BATCHES"
+            in sql
+        ):
+            raise RuntimeError("Simulated audit failure")
+
+    cursor.execute.side_effect = execute_with_failure
+
+    manifest = {
+        "batch_id": "0003",
+        "sha256": "a" * 64,
+        "record_count": 5,
+    }
+
+    with pytest.raises(
+        RuntimeError,
+        match="Simulated audit failure",
+    ):
+        publish_fx_landing(
+            cursor,
+            manifest,
+            "raw/exchange_rates/batch_id=0003/rates.json",
+        )
+
+    executed = [
+        call.args[0].strip()
+        for call in cursor.execute.call_args_list
+    ]
+
+    assert executed[0] == "BEGIN"
+    assert executed[-1] == "ROLLBACK"
+    assert "COMMIT" not in executed
 
 
 class FakeS3:

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import boto3
 import pendulum
+from airflow.exceptions import AirflowFailException
 from airflow.sdk import dag, task
 
 from retail_pipeline.exchange_rates import (
@@ -20,6 +21,7 @@ from retail_pipeline.storage import (
     upload_batch,
     upload_exchange_rate_batch,
 )
+from retail_pipeline.validation import DataQualityError
 from retail_pipeline.warehouse import (
     create_snowflake_connection,
     load_exchange_rate_batch,
@@ -98,27 +100,60 @@ def retail_ingestion_pipeline():
             "s3_raw_key": result["raw_key"],
         }
 
-    @task
+    @task(
+        retries=2,
+        retry_delay=timedelta(minutes=2),
+        retry_exponential_backoff=True,
+    )
     def load_orders(batch: dict) -> dict:
+        from airflow.sdk import get_current_context
+
+        from retail_pipeline.logging_utils import log_event
+
+        context = get_current_context()
+
         manifest = json.loads(
             Path(batch["manifest_path"]).read_text(
                 encoding="utf-8"
             )
         )
 
+        log_event(
+            "orders_load_started",
+            dataset="orders",
+            batch_id=manifest["batch_id"],
+            dag_run_id=context["run_id"],
+        )
+
         connection = create_snowflake_connection()
 
         try:
-            result = load_orders_batch(
-                connection=connection,
-                s3_client=get_s3_client(),
-                bucket=os.environ["S3_BUCKET_NAME"],
-                manifest=manifest,
+            try:
+                result = load_orders_batch(
+                    connection=connection,
+                    s3_client=get_s3_client(),
+                    bucket=os.environ["S3_BUCKET_NAME"],
+                    manifest=manifest,
+                )
+            except DataQualityError as exc:
+                raise AirflowFailException(
+                    f"Orders batch failed validation: {exc}"
+                ) from exc
+
+            log_event(
+                "orders_load_completed",
+                dataset="orders",
+                batch_id=manifest["batch_id"],
+                dag_run_id=context["run_id"],
+                source_rows=result["source_rows"],
+                inserted_rows=result["inserted_rows"],
+                status=result["status"],
             )
+
+            return result
+
         finally:
             connection.close()
-
-        return result
 
     # ------------------------------------------
     # EXCHANGE-RATE INGESTION

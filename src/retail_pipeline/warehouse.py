@@ -171,14 +171,16 @@ def load_orders_batch(
 
         loaded, distinct_orders, null_keys = cursor.fetchone()
 
-        if (
-            loaded != source_count
-            or distinct_orders != loaded
-            or null_keys != 0
-        ):
-            raise ValueError(
-                "Landing table failed row-count or key validation"
-            )
+        from retail_pipeline.validation import (
+            validate_orders_landing,
+        )
+
+        validate_orders_landing(
+            expected_rows=source_count,
+            loaded_rows=loaded,
+            distinct_order_ids=distinct_orders,
+            null_order_ids=null_keys,
+        )
 
         # 5. Reject conflicting values for existing order IDs.
         cursor.execute(
@@ -305,6 +307,33 @@ def load_exchange_rate_batch(
     cursor = connection.cursor()
 
     try:
+        cursor.execute("""
+            CREATE OR REPLACE TEMPORARY TABLE
+                RETAIL_DB.RAW.FX_RATES_INGEST_TMP
+            LIKE RETAIL_DB.RAW.EXCHANGE_RATES_API
+        """)
+
+        # Only interpolate a batch ID validated against r"[0-9]+".
+        cursor.execute(
+            f"""
+            COPY INTO RETAIL_DB.RAW.FX_RATES_INGEST_TMP (
+                RAW_RECORD,
+                SOURCE_FILE
+            )
+            FROM (
+                SELECT
+                    t.$1,
+                    METADATA$FILENAME
+                FROM @RETAIL_DB.RAW.FX_RATES_STAGE/batch_id={batch_id}/rates.json t
+            )
+            FILE_FORMAT = (
+                FORMAT_NAME = 'RETAIL_DB.RAW.FX_JSON_FORMAT'
+            )
+            ON_ERROR = 'ABORT_STATEMENT'
+            FORCE = TRUE
+            """
+        )
+        
         # Check whether this source file has already
         # been loaded into the RAW table.
         cursor.execute(
@@ -371,3 +400,55 @@ def load_exchange_rate_batch(
 
     finally:
         cursor.close()
+
+def publish_fx_landing(
+    cursor,
+    manifest: dict,
+    source_key: str,
+) -> None:
+    """Publish validated FX records and audit atomically."""
+
+    cursor.execute("BEGIN")
+
+    try:
+        cursor.execute(
+            """
+            INSERT INTO RETAIL_DB.RAW.EXCHANGE_RATES_API (
+                RAW_RECORD,
+                SOURCE_FILE
+            )
+            SELECT
+                RAW_RECORD,
+                SOURCE_FILE
+            FROM RETAIL_DB.RAW.FX_RATES_INGEST_TMP
+            """
+        )
+
+        cursor.execute(
+            """
+            INSERT INTO RETAIL_DB.RAW.INGESTION_BATCHES (
+                DATASET,
+                BATCH_ID,
+                SOURCE_FILE,
+                SOURCE_SHA256,
+                SOURCE_ROW_COUNT,
+                INSERTED_ROW_COUNT,
+                STATUS
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, 'SUCCESS')
+            """,
+            (
+                "exchange_rates",
+                manifest["batch_id"],
+                source_key,
+                manifest["sha256"],
+                manifest["record_count"],
+                manifest["record_count"],
+            ),
+        )
+
+        cursor.execute("COMMIT")
+
+    except Exception:
+        cursor.execute("ROLLBACK")
+        raise
