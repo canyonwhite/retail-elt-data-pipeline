@@ -5,9 +5,12 @@ from pathlib import Path
 
 import boto3
 import pendulum
-
 from airflow.sdk import dag, task
 
+from retail_pipeline.exchange_rates import (
+    create_http_session,
+    prepare_exchange_rate_batch,
+)
 from retail_pipeline.ingestion import (
     DATASETS,
     inspect_csv,
@@ -17,16 +20,11 @@ from retail_pipeline.storage import (
     upload_batch,
     upload_exchange_rate_batch,
 )
-from retail_pipeline.exchange_rates import (
-    create_http_session,
-    prepare_exchange_rate_batch,
-)
 from retail_pipeline.warehouse import (
     create_snowflake_connection,
-    load_orders_batch,
     load_exchange_rate_batch,
+    load_orders_batch,
 )
-
 
 DATA_DIR = Path("/opt/airflow/data")
 ORDERS_BATCH_ID = "0002"
