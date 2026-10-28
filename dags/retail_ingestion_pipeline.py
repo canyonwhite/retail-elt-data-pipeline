@@ -8,11 +8,13 @@ import pendulum
 from airflow.exceptions import AirflowFailException
 from airflow.sdk import dag, task
 
+from retail_pipeline.csv_warehouse import load_csv_snapshot
 from retail_pipeline.exchange_rates import (
     create_http_session,
     prepare_exchange_rate_batch,
 )
 from retail_pipeline.ingestion import (
+    CSV_FILES,
     DATASETS,
     inspect_csv,
     save_manifest,
@@ -29,8 +31,10 @@ from retail_pipeline.warehouse import (
 )
 
 DATA_DIR = Path("/opt/airflow/data")
+
 ORDERS_BATCH_ID = "0002"
 FX_BATCH_ID = "0001"
+CSV_BATCH_ID = "0001"
 
 
 def get_s3_client():
@@ -54,17 +58,9 @@ def get_s3_client():
 )
 def retail_ingestion_pipeline():
 
-    # ------------------------------------------
-    # ORDERS INGESTION
-    # ------------------------------------------
-
     @task
     def prepare_orders() -> dict:
-        source = (
-            DATA_DIR
-            / "raw"
-            / "olist_orders_dataset.csv"
-        )
+        source = DATA_DIR / "raw" / "olist_orders_dataset.csv"
 
         manifest = inspect_csv(
             source,
@@ -155,9 +151,73 @@ def retail_ingestion_pipeline():
         finally:
             connection.close()
 
-    # ------------------------------------------
-    # EXCHANGE-RATE INGESTION
-    # ------------------------------------------
+    @task
+    def prepare_csv(dataset: str) -> dict:
+        source = DATA_DIR / "raw" / CSV_FILES[dataset]
+
+        manifest = inspect_csv(
+            source,
+            DATASETS[dataset],
+            CSV_BATCH_ID,
+        )
+
+        manifest_path = (
+            DATA_DIR
+            / "manifests"
+            / dataset
+            / f"batch_id={CSV_BATCH_ID}.json"
+        )
+
+        save_manifest(manifest, manifest_path)
+
+        return {
+            "source_path": str(source),
+            "manifest_path": str(manifest_path),
+        }
+
+    @task
+    def upload_csv(batch: dict) -> dict:
+        result = upload_batch(
+            s3_client=get_s3_client(),
+            bucket=os.environ["S3_BUCKET_NAME"],
+            source_path=Path(batch["source_path"]),
+            manifest_path=Path(batch["manifest_path"]),
+        )
+
+        return {
+            **batch,
+            "s3_raw_key": result["raw_key"],
+        }
+
+    @task(
+        retries=2,
+        retry_delay=timedelta(minutes=2),
+        retry_exponential_backoff=True,
+    )
+    def load_csv(batch: dict) -> dict:
+        manifest = json.loads(
+            Path(batch["manifest_path"]).read_text(
+                encoding="utf-8"
+            )
+        )
+
+        connection = create_snowflake_connection()
+
+        try:
+            try:
+                return load_csv_snapshot(
+                    connection,
+                    manifest,
+                    batch["s3_raw_key"],
+                )
+            except DataQualityError as exc:
+                raise AirflowFailException(
+                    f"{manifest['dataset']} batch failed "
+                    f"validation: {exc}"
+                ) from exc
+
+        finally:
+            connection.close()
 
     @task
     def prepare_fx() -> dict:
@@ -202,23 +262,18 @@ def retail_ingestion_pipeline():
         connection = create_snowflake_connection()
 
         try:
-            result = load_exchange_rate_batch(
+            return load_exchange_rate_batch(
                 connection,
                 manifest,
             )
         finally:
             connection.close()
 
-        return result
-
-    # ------------------------------------------
-    # FINAL VALIDATION
-    # ------------------------------------------
-
     @task
     def validate_pipeline(
         orders_result: dict,
         fx_result: dict,
+        csv_results: list[dict],
     ) -> None:
         allowed_statuses = {
             "success",
@@ -231,6 +286,12 @@ def retail_ingestion_pipeline():
         if fx_result["status"] not in allowed_statuses:
             raise ValueError("FX ingestion failed")
 
+        for result in csv_results:
+            if result["status"] not in allowed_statuses:
+                raise ValueError(
+                    f"{result['dataset']} ingestion failed"
+                )
+
         connection = create_snowflake_connection()
 
         try:
@@ -240,15 +301,12 @@ def retail_ingestion_pipeline():
                 cursor.execute(
                     """
                     SELECT
-                        COUNT(*) -
-                        COUNT(DISTINCT ORDER_ID)
+                        COUNT(*) - COUNT(DISTINCT ORDER_ID)
                     FROM RETAIL_DB.RAW.ORDERS
                     """
                 )
 
-                duplicate_or_null_count = (
-                    cursor.fetchone()[0]
-                )
+                duplicate_or_null_count = cursor.fetchone()[0]
 
                 if duplicate_or_null_count != 0:
                     raise ValueError(
@@ -261,19 +319,15 @@ def retail_ingestion_pipeline():
         finally:
             connection.close()
 
-        print("Both ingestion branches completed.")
-        print(
-            "Orders status:",
-            orders_result["status"],
-        )
-        print(
-            "FX status:",
-            fx_result["status"],
-        )
+        print("All ingestion branches completed.")
+        print("Orders status:", orders_result["status"])
+        print("FX status:", fx_result["status"])
 
-    # ------------------------------------------
-    # DEFINE TASK DEPENDENCIES
-    # ------------------------------------------
+        for result in csv_results:
+            print(
+                f"{result['dataset']} status:",
+                result["status"],
+            )
 
     orders_result = load_orders(
         upload_orders(
@@ -287,9 +341,27 @@ def retail_ingestion_pipeline():
         )
     )
 
+    csv_results = []
+
+    for dataset in sorted(CSV_FILES):
+        prepared = prepare_csv.override(
+            task_id=f"prepare_{dataset}"
+        )(dataset)
+
+        uploaded = upload_csv.override(
+            task_id=f"upload_{dataset}"
+        )(prepared)
+
+        loaded = load_csv.override(
+            task_id=f"load_{dataset}"
+        )(uploaded)
+
+        csv_results.append(loaded)
+
     validate_pipeline(
         orders_result,
         fx_result,
+        csv_results,
     )
 
 

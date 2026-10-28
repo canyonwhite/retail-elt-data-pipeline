@@ -10,7 +10,6 @@ from pathlib import Path
 class DatasetSpec:
     name: str
     required_columns: tuple[str, ...]
-    allow_extra_columns: bool
 
 
 DATASETS = {
@@ -26,7 +25,6 @@ DATASETS = {
             "order_delivered_customer_date",
             "order_estimated_delivery_date",
         ),
-        allow_extra_columns=False,
     ),
     "payments": DatasetSpec(
         name="payments",
@@ -37,7 +35,6 @@ DATASETS = {
             "payment_installments",
             "payment_value",
         ),
-        allow_extra_columns=False,
     ),
     "order_items": DatasetSpec(
         name="order_items",
@@ -50,7 +47,6 @@ DATASETS = {
             "price",
             "freight_value",
         ),
-        allow_extra_columns=False,
     ),
     "customers": DatasetSpec(
         name="customers",
@@ -61,7 +57,6 @@ DATASETS = {
             "customer_city",
             "customer_state",
         ),
-        allow_extra_columns=False,
     ),
     "products": DatasetSpec(
         name="products",
@@ -76,7 +71,6 @@ DATASETS = {
             "product_height_cm",
             "product_width_cm",
         ),
-        allow_extra_columns=False,
     ),
     "sellers": DatasetSpec(
         name="sellers",
@@ -86,9 +80,18 @@ DATASETS = {
             "seller_city",
             "seller_state",
         ),
-        allow_extra_columns=False,
     ),
 }
+
+# Orders retain their existing dedicated ingestion branch.
+CSV_FILES = {
+    "payments": "olist_order_payments_dataset.csv",
+    "order_items": "olist_order_items_dataset.csv",
+    "customers": "olist_customers_dataset.csv",
+    "products": "olist_products_dataset.csv",
+    "sellers": "olist_sellers_dataset.csv",
+}
+
 
 def inspect_csv(
     file_path: Path,
@@ -137,7 +140,7 @@ def inspect_csv(
 
         if row_count == 0:
             raise ValueError(
-                f"No rows detected in this file. Row count: {row_count}"
+                "No rows detected in this file. Row count: 0"
             )
 
     checksum = hashlib.sha256()
@@ -157,10 +160,9 @@ def inspect_csv(
         "file_size_bytes": file_path.stat().st_size,
         "sha256": checksum.hexdigest(),
         "columns": columns,
-        "created_at": datetime.now(
-            UTC
-        ).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
     }
+
 
 def save_manifest(
     manifest: dict,
